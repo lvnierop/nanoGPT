@@ -74,8 +74,15 @@ for i in range(n_layer):
         Wq[sl, :] = A.T @ Wq_h
         Wk[sl, :] = Ainv @ Wk_h
 
+        # check B condition:
+        B = Ainv.T
+        s = torch.linalg.svdvals(B)
+        cond = (s.max() / s.min()).item()
+        inv_norm = torch.linalg.norm(torch.linalg.inv(B)).item()
+        A_norm = torch.linalg.norm(B).item()
+        print("For gauged:", "cond", cond, "||A||", A_norm, "||A^-1||", inv_norm)
 
-# copy checpoint for modification
+
 torch.save(gauged_checkpoint, ckpt_path_gauged)
 
 sd = random_checkpoint["model"]
@@ -90,14 +97,14 @@ for i in range(n_layer):
         sl = slice(h*d_head, (h+1)*d_head)
 
         A = torch.randn(d_head, d_head, device=W.device, dtype=W.dtype)
-        Ainv = torch.linalg.inv(A)
+        B = torch.randn(d_head, d_head, device=W.device, dtype=W.dtype)
 
         Wq_h = Wq[sl, :].clone()
         Wk_h = Wk[sl, :].clone()
 
         # implements q -> q A and k -> k (A^{-1})^T (logits cancel)
         Wq[sl, :] = A.T @ Wq_h
-        Wk[sl, :] = Ainv @ Wk_h
+        Wk[sl, :] = B @ Wk_h
 
 torch.save(random_checkpoint, ckpt_path_random)
 
@@ -109,13 +116,6 @@ for i in range(n_layer):
     W = sd[f"transformer.h.{i}.attn.c_attn.weight"]   # (3*n_embd, n_embd)
     Wq = W[:n_embd, :]
     Wk = W[n_embd:2*n_embd, :]
-    print(f"\nLayer {i} Wq BEFORE:")
-    print(Wq)
-    print(f"\nLayer {i} Wk BEFORE:")
-    print(Wk)
-    print(f"shape of Wq: {Wq.shape}")
-    print(f"shape of Wk: {Wk.shape}")
-
     for h in range(n_head):
         sl = slice(h*d_head, (h+1)*d_head)
 
@@ -129,11 +129,14 @@ for i in range(n_layer):
         # implements q -> q A and k -> k (A^{-1})^T (logits cancel)
         Wq[sl, :] = A_T @ Wq_h
         Wk[sl, :] = Ainv @ Wk_h
-    print(f"\nLayer {i} Wq AFTER:")
-    print(Wq)
-    print(f"\nLayer {i} Wk AFTER:")
-    print(Wk)
-    print(Wq[:, :d_head].round(decimals=3))
+
+        # check B condition:
+        s = torch.linalg.svdvals(B)
+        cond = (s.max() / s.min()).item()
+        inv_norm = torch.linalg.norm(torch.linalg.inv(B)).item()
+        A_norm = torch.linalg.norm(B).item()
+        print("For gauge fixed:", "cond", cond, "||A||", A_norm, "||A^-1||", inv_norm)
+
 torch.save(gauge_fixed_checkpoint, ckpt_path_gauge_fixed)
 
 # Layer norm 1: state_dict[f'transformer.h.{i}.ln_1.weight']  # shape: (n_embd,)
