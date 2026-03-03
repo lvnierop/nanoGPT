@@ -15,6 +15,45 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+
+class CAttnKFirstBlockPruned(nn.Module):
+    """
+    Replacement for nanoGPT's c_attn: Linear(C -> 3C),
+    but with K = [x[..., :hs], K2(x)] where hs = C // n_head.
+
+    Stored learnable projection outputs: Q (C), K2 (C-hs), V (C) => total 3C - hs.
+    Forward stitches to full (3C) by inserting x[..., :hs] into the K slot.
+
+    This replaces nn.Linear, but with different inputs
+    """
+    def __init__(self, n_embed: int, n_head: int, bias: bool = True):
+        super().__init__()
+        assert n_embed % n_head == 0
+        self.C = n_embed
+        self.hs = n_embed // n_head
+
+        self.linear = nn.Linear(self.C, 3 * self.C - self.hs, bias=bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (..., C)
+        assert x.size(-1) == self.C
+
+        y = self.linear(x)  # (..., 3C - hs)
+
+        C, hs = self.C, self.hs
+        q  = y[..., :C]                     # (..., C)
+        k2 = y[..., C:C + (C - hs)]         # (..., C-hs)
+        v  = y[..., C + (C - hs):]          # (..., C)
+
+        qkv = x.new_empty(*x.shape[:-1], 3 * C)
+        qkv[..., :C] = q
+        qkv[..., C:C+hs] = x[..., :hs]
+        qkv[..., C+hs:2*C] = k2
+        qkv[..., 2*C:] = v
+        return qkv
+        
+
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -26,13 +65,17 @@ class LayerNorm(nn.Module):
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
+
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        if getattr(config, "use_identity_block", False):
+            self.c_attn = CAttnKFirstBlockPruned(config.n_embd, config.n_head, bias=config.bias)
+        else:
+            self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         # regularization
@@ -114,6 +157,7 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    use_identity_block: bool = False
 
 class GPT(nn.Module):
 
