@@ -29,6 +29,8 @@ from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
 
+TRAINING_SPEED_TEST = True
+
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
@@ -247,7 +249,15 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
+if TRAINING_SPEED_TEST:
+    timing_data = {
+        "time": [],
+        "iter_num": [],
+        "train_loss": [],
+        "val_loss": [],
+    }
 X, Y = get_batch('train') # fetch the very first batch
+start_time = time.time()
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
@@ -263,6 +273,11 @@ while True:
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        if TRAINING_SPEED_TEST:
+            timing_data["time"].append(time.time() - start_time)
+            timing_data["iter_num"].append(iter_num)
+            timing_data["train_loss"].append(losses['train'])
+            timing_data["val_loss"].append(losses['val'])
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -334,3 +349,7 @@ while True:
 
 if ddp:
     destroy_process_group()
+
+if TRAINING_SPEED_TEST:
+    with open(os.path.join(out_dir, 'timing_data.pkl'), 'wb') as f:
+        pickle.dump(timing_data, f)
