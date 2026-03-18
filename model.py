@@ -51,7 +51,39 @@ class CAttnKFirstBlockPruned(nn.Module):
         qkv[..., C+hs:2*C] = k2
         qkv[..., 2*C:] = v
         return qkv
+
+
+class PartiallyFixedLinear(nn.Module):
+    def __init__(self, in_features, out_features, d_skip):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+
+        assert in_features % d_skip == 0
+
+        eye = torch.eye(d_skip)
+
+        num_blocks = in_features // d_skip
+        fixed_weights = torch.tile(eye, (1, num_blocks))
+
+
+        # 1. Register the fixed part as a buffer (moves with model.to(device))
+        # Shape: (d, in_features)
+        self.register_buffer('fixed_weight', fixed_weights)
         
+        # 2. Register the trainable part as a Parameter
+        # Shape: (out_features - d, in_features)
+        self.trainable_weight = nn.Parameter(torch.randn(out_features - d_skip, in_features))
+        
+        self.bias = nn.Parameter(torch.randn(out_features))
+
+    def forward(self, x):
+        # 3. Concatenate rows to form the full weight matrix (out_features, in_features)
+        full_weight = torch.cat([self.fixed_weight, self.trainable_weight], dim=0)
+        
+        return torch.nn.functional.linear(x, full_weight)
+
+
 
 
 class LayerNorm(nn.Module):
@@ -73,7 +105,8 @@ class CausalSelfAttention(nn.Module):
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
         if getattr(config, "use_identity_block", False):
-            self.c_attn = CAttnKFirstBlockPruned(config.n_embd, config.n_head, bias=config.bias)
+            assert config.bias == False
+            self.c_attn = PartiallyFixedLinear(config.n_embd, 3 * config.n_embd, d_skip=config.n_embd // config.n_head)
         else:
             self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         # output projection
